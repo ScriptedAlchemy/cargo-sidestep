@@ -1,0 +1,18 @@
+[package]
+name = "cargo-sidestep"
+version = "0.1.0"
+edition = "2021"
+description = "A Cargo wrapper that reroutes lock-contended commands into isolated lanes."
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/ScriptedAlchemy/cargo-sidestep"
+keywords = ["cargo", "build", "parallel", "cache", "wrapper"]
+categories = ["development-tools::cargo-plugins", "development-tools::build-utils"]
+
+[lib]
+name = "cargo_sidestep"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cargo-sidestep"
+path = "src/main.rs"
