@@ -35,6 +35,7 @@ if [ "$mode" = "package-cache" ] && [ "$attempts" -eq 2 ] && [ "${CARGO_NET_OFFL
 fi
 
 printf 'plan=%s\n' "${CARGO_SIDESTEP_PLAN:-unknown}"
+printf 'subcommand=%s\n' "${1:-unset}"
 printf 'cargo_home=%s\n' "${CARGO_HOME:-unset}"
 printf 'target_dir=%s\n' "${CARGO_TARGET_DIR:-unset}"
 printf 'build_dir=%s\n' "${CARGO_BUILD_BUILD_DIR:-unset}"

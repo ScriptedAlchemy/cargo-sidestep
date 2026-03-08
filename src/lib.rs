@@ -23,7 +23,7 @@ pub fn main_entry() -> i32 {
 }
 
 fn run() -> Result<i32, String> {
-    let args = env::args_os().skip(1).collect::<Vec<_>>();
+    let args = normalize_cli_args(env::args_os().skip(1).collect());
     if args.is_empty() || is_help(&args) {
         print_help();
         return Ok(0);
@@ -58,6 +58,13 @@ fn run() -> Result<i32, String> {
     }
 }
 
+fn normalize_cli_args(mut args: Vec<OsString>) -> Vec<OsString> {
+    if matches!(args.first().and_then(|arg| arg.to_str()), Some("sidestep")) {
+        args.remove(0);
+    }
+    args
+}
+
 fn rerun_from_build_lock(
     settings: &Settings,
     args: &[OsString],
@@ -90,15 +97,14 @@ fn rerun_from_home_lock(
         &lane.readonly_home_dir,
         OverlayMode::ReadonlyOffline,
     )?;
-    let offline_plan =
-        ExecPlan::readonly_overlay(settings, paths, lane, &offline_home, supports_build_dir);
+    let offline_plan = ExecPlan::readonly_overlay(paths, lane, &offline_home, supports_build_dir);
     match run_plan(settings, args, &offline_plan)? {
         RunOutcome::Completed(code, stderr) => {
             if code != 0 && stderr_looks_like_offline_miss(&stderr) {
                 eprintln!(
                     "cargo-sidestep: readonly overlay missed the warm cache; retrying with an isolated online Cargo home"
                 );
-                rerun_online_overlay(settings, args, paths, lane, supports_build_dir)
+                rerun_online_overlay(settings, args, lane, supports_build_dir)
             } else {
                 Ok(code)
             }
@@ -107,7 +113,7 @@ fn rerun_from_home_lock(
             eprintln!(
                 "cargo-sidestep: readonly overlay still saw {kind}; escalating to fully isolated Cargo home"
             );
-            rerun_online_overlay(settings, args, paths, lane, supports_build_dir)
+            rerun_online_overlay(settings, args, lane, supports_build_dir)
         }
     }
 }
@@ -115,7 +121,6 @@ fn rerun_from_home_lock(
 fn rerun_online_overlay(
     settings: &Settings,
     args: &[OsString],
-    paths: &WorkspacePaths,
     lane: &LaneLease,
     supports_build_dir: bool,
 ) -> Result<i32, String> {
@@ -124,7 +129,7 @@ fn rerun_online_overlay(
         &lane.online_home_dir,
         OverlayMode::IsolatedOnline,
     )?;
-    let plan = ExecPlan::online_overlay(settings, paths, lane, &online_home, supports_build_dir);
+    let plan = ExecPlan::online_overlay(lane, &online_home, supports_build_dir);
     match run_plan(settings, args, &plan)? {
         RunOutcome::Completed(code, _) => Ok(code),
         RunOutcome::Lock(kind) => Err(format!(
@@ -295,7 +300,6 @@ impl ExecPlan {
     }
 
     fn readonly_overlay(
-        _settings: &Settings,
         paths: &WorkspacePaths,
         lane: &LaneLease,
         cargo_home: &Path,
@@ -310,13 +314,7 @@ impl ExecPlan {
         }
     }
 
-    fn online_overlay(
-        _settings: &Settings,
-        _paths: &WorkspacePaths,
-        lane: &LaneLease,
-        cargo_home: &Path,
-        supports_build_dir: bool,
-    ) -> Self {
+    fn online_overlay(lane: &LaneLease, cargo_home: &Path, supports_build_dir: bool) -> Self {
         Self {
             label: "online-overlay",
             cargo_home: cargo_home.to_path_buf(),
@@ -763,7 +761,11 @@ fn err_string(err: impl std::fmt::Display) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_cargo_version, stable_hash_u64, stderr_looks_like_offline_miss, LockKind};
+    use super::{
+        normalize_cli_args, parse_cargo_version, stable_hash_u64, stderr_looks_like_offline_miss,
+        LockKind,
+    };
+    use std::ffi::OsString;
 
     #[test]
     fn parses_lock_lines() {
@@ -799,5 +801,18 @@ mod tests {
     fn stable_hash_is_stable() {
         assert_eq!(stable_hash_u64("abc"), stable_hash_u64("abc"));
         assert_ne!(stable_hash_u64("abc"), stable_hash_u64("abd"));
+    }
+
+    #[test]
+    fn strips_cargo_plugin_prefix_from_args() {
+        let args = normalize_cli_args(vec![
+            OsString::from("sidestep"),
+            OsString::from("check"),
+            OsString::from("--workspace"),
+        ]);
+        assert_eq!(
+            args,
+            vec![OsString::from("check"), OsString::from("--workspace")]
+        );
     }
 }
