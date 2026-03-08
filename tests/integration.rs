@@ -103,3 +103,59 @@ fn strips_plugin_prefix_when_invoked_as_cargo_subcommand() {
     assert!(stdout.contains("subcommand=check"), "{stdout}");
     assert!(!stdout.contains("subcommand=sidestep"), "{stdout}");
 }
+
+#[test]
+fn forwards_help_subcommands_to_cargo() {
+    let root = temp_dir("help-forwarding");
+    let attempts = root.join("attempts.txt");
+    let state_dir = root.join("state");
+    let base_home = root.join("base-home");
+    fs::create_dir_all(&base_home).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-sidestep"))
+        .arg("help")
+        .arg("check")
+        .env("CARGO_SIDESTEP_CARGO_BIN", "./tests/fake_cargo.sh")
+        .env("FAKE_CARGO_ATTEMPTS_FILE", &attempts)
+        .env("FAKE_CARGO_MODE", "none")
+        .env("FAKE_BASE_CARGO_HOME", &base_home)
+        .env("CARGO_HOME", &base_home)
+        .env("CARGO_SIDESTEP_STATE_DIR", &state_dir)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("subcommand=help"), "{stdout}");
+    assert!(stdout.contains("arg2=check"), "{stdout}");
+}
+
+#[test]
+fn pre_191_build_lock_falls_back_to_lane_target_dir() {
+    let root = temp_dir("pre-191-build-dir");
+    let attempts = root.join("attempts.txt");
+    let state_dir = root.join("state");
+    let base_home = root.join("base-home");
+    fs::create_dir_all(&base_home).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-sidestep"))
+        .arg("check")
+        .env("CARGO_SIDESTEP_CARGO_BIN", "./tests/fake_cargo.sh")
+        .env("FAKE_CARGO_ATTEMPTS_FILE", &attempts)
+        .env("FAKE_CARGO_MODE", "build-dir")
+        .env("FAKE_CARGO_VERSION", "1.90.0")
+        .env("FAKE_BASE_CARGO_HOME", &base_home)
+        .env("CARGO_HOME", &base_home)
+        .env("CARGO_SIDESTEP_STATE_DIR", &state_dir)
+        .env("CARGO_SIDESTEP_FALLBACK_AFTER_MS", "100")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("plan=build-lane"), "{stdout}");
+    assert!(stdout.contains("build_dir=unset"), "{stdout}");
+    assert!(stdout.contains("/lanes/lane-"), "{stdout}");
+}

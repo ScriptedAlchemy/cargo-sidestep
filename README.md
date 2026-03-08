@@ -7,12 +7,14 @@ It keeps the fast path shared, but moves lock-sensitive state when Cargo prints 
 ## What it does
 
 - Uses a managed per-workspace state root instead of writing straight into the repository `target/`.
+- Resolves `--manifest-path` to the enclosing workspace when one exists, so member crates share the same sidestep state.
 - On Cargo 1.91+, separates `CARGO_BUILD_BUILD_DIR` from `CARGO_TARGET_DIR` so lock-sensitive intermediates can move without throwing away final outputs.
 - Watches Cargo stderr for lock-wait messages.
 - If the lock is the build directory, retries in a reusable build lane.
 - If the lock is in Cargo home (`package cache`, `registry index`, `git db`), retries with an overlay `CARGO_HOME`:
   - first a readonly/offline overlay that reuses cached crate archives
   - then a fully isolated online overlay if the readonly pass does not have enough cached state
+- Keeps active lane leases refreshed while a command owns them, so long-running jobs do not get their lanes reclaimed.
 
 ## Why this exists
 
@@ -46,10 +48,22 @@ As a Cargo subcommand:
 cargo sidestep test -p my_crate
 ```
 
+Wrapper help:
+
+```bash
+cargo sidestep --help
+```
+
 With an explicit manifest:
 
 ```bash
 cargo sidestep check --manifest-path ./crates/api/Cargo.toml
+```
+
+Cargo help is still forwarded normally:
+
+```bash
+cargo sidestep help check
 ```
 
 ## Environment
@@ -63,6 +77,7 @@ cargo sidestep check --manifest-path ./crates/api/Cargo.toml
 
 - Final build outputs live under the sidestep-managed target root, not the repository `./target`.
 - Fallback lane directories are reused across invocations, so repeated reroutes can stay warm.
+- Active lane leases are refreshed while the command is running.
 - The readonly overlay intentionally shares only conservative cache material from `CARGO_HOME`.
 
 ## Limitations

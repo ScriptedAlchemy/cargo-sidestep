@@ -11,6 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const DEFAULT_FALLBACK_AFTER_MS: u64 = 1_500;
 const DEFAULT_LANE_SLOTS: usize = 4;
 const STALE_LEASE_AFTER_SECS: u64 = 12 * 60 * 60;
+const LEASE_REFRESH_INTERVAL_SECS: u64 = 60;
 
 pub fn main_entry() -> i32 {
     match run() {
@@ -141,7 +142,7 @@ fn rerun_online_overlay(
 fn is_help(args: &[OsString]) -> bool {
     matches!(
         args.first().and_then(|arg| arg.to_str()),
-        Some("-h" | "--help" | "help")
+        Some("-h" | "--help")
     )
 }
 
@@ -489,11 +490,27 @@ struct LaneLease {
     target_dir: PathBuf,
     readonly_home_dir: PathBuf,
     online_home_dir: PathBuf,
+    heartbeat: Option<LeaseHeartbeat>,
 }
 
 impl Drop for LaneLease {
     fn drop(&mut self) {
+        if let Some(heartbeat) = self.heartbeat.take() {
+            heartbeat.stop();
+        }
         let _ = fs::remove_file(&self.lease_file);
+    }
+}
+
+struct LeaseHeartbeat {
+    stop_tx: mpsc::Sender<()>,
+    join_handle: thread::JoinHandle<()>,
+}
+
+impl LeaseHeartbeat {
+    fn stop(self) {
+        let _ = self.stop_tx.send(());
+        let _ = self.join_handle.join();
     }
 }
 
@@ -534,6 +551,7 @@ fn try_acquire_lane(paths: &WorkspacePaths, name: &str) -> Result<Option<LaneLea
             let target_dir = root.join("target");
             let readonly_home_dir = root.join("cargo-home-readonly");
             let online_home_dir = root.join("cargo-home-online");
+            let heartbeat = start_lease_heartbeat(&lease_file);
             Ok(Some(LaneLease {
                 name: name.to_string(),
                 lease_file,
@@ -541,11 +559,40 @@ fn try_acquire_lane(paths: &WorkspacePaths, name: &str) -> Result<Option<LaneLea
                 target_dir,
                 readonly_home_dir,
                 online_home_dir,
+                heartbeat: Some(heartbeat),
             }))
         }
         Err(err) if err.kind() == io::ErrorKind::AlreadyExists => Ok(None),
         Err(err) => Err(err_string(err)),
     }
+}
+
+fn start_lease_heartbeat(lease_file: &Path) -> LeaseHeartbeat {
+    let lease_file = lease_file.to_path_buf();
+    let pid = std::process::id();
+    let (stop_tx, stop_rx) = mpsc::channel();
+    let join_handle = thread::spawn(move || {
+        let interval = Duration::from_secs(LEASE_REFRESH_INTERVAL_SECS);
+        loop {
+            match stop_rx.recv_timeout(interval) {
+                Ok(_) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    let _ = refresh_lease_file(&lease_file, pid);
+                }
+            }
+        }
+    });
+    LeaseHeartbeat {
+        stop_tx,
+        join_handle,
+    }
+}
+
+fn refresh_lease_file(path: &Path, pid: u32) -> io::Result<()> {
+    let mut file = OpenOptions::new().write(true).truncate(true).open(path)?;
+    writeln!(file, "pid={pid}")?;
+    writeln!(file, "timestamp={}", unix_timestamp())?;
+    file.flush()
 }
 
 fn lease_is_stale(path: &Path) -> bool {
@@ -634,15 +681,17 @@ fn symlink_path(src: &Path, dst: &Path) -> io::Result<()> {
 }
 
 fn discover_workspace_root(cwd: &Path, args: &[OsString]) -> Result<PathBuf, String> {
-    if let Some(manifest) = manifest_path_from_args(args) {
-        return manifest
-            .parent()
-            .map(Path::to_path_buf)
-            .ok_or_else(|| "manifest path has no parent directory".to_string());
-    }
-
+    let search_root = manifest_path_from_args(args)
+        .map(|manifest| {
+            manifest
+                .parent()
+                .map(Path::to_path_buf)
+                .ok_or_else(|| "manifest path has no parent directory".to_string())
+        })
+        .transpose()?
+        .unwrap_or_else(|| cwd.to_path_buf());
     let mut nearest_manifest = None;
-    for ancestor in cwd.ancestors() {
+    for ancestor in search_root.ancestors() {
         let manifest = ancestor.join("Cargo.toml");
         if !manifest.exists() {
             continue;
@@ -762,10 +811,24 @@ fn err_string(err: impl std::fmt::Display) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_cli_args, parse_cargo_version, stable_hash_u64, stderr_looks_like_offline_miss,
-        LockKind,
+        discover_workspace_root, normalize_cli_args, parse_cargo_version, stable_hash_u64,
+        stderr_looks_like_offline_miss, LockKind,
     };
+    use std::env;
     use std::ffi::OsString;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = env::temp_dir().join(format!("cargo-sidestep-lib-{name}-{stamp}"));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
 
     #[test]
     fn parses_lock_lines() {
@@ -814,5 +877,33 @@ mod tests {
             args,
             vec![OsString::from("check"), OsString::from("--workspace")]
         );
+    }
+
+    #[test]
+    fn manifest_path_uses_enclosing_workspace_root() {
+        let root = temp_dir("workspace-root");
+        let member_dir = root.join("crates").join("member");
+        fs::create_dir_all(&member_dir).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/member\"]\n",
+        )
+        .unwrap();
+        fs::write(
+            member_dir.join("Cargo.toml"),
+            "[package]\nname = \"member\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+
+        let resolved = discover_workspace_root(
+            &root,
+            &[OsString::from(format!(
+                "--manifest-path={}",
+                member_dir.join("Cargo.toml").display()
+            ))],
+        )
+        .unwrap();
+
+        assert_eq!(resolved, root);
     }
 }

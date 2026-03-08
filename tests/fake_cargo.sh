@@ -1,7 +1,7 @@
 #!/bin/sh
 
 if [ "$1" = "-V" ]; then
-  echo "cargo 1.91.0 (fake 2026-03-08)"
+  echo "cargo ${FAKE_CARGO_VERSION:-1.91.0} (fake 2026-03-08)"
   exit 0
 fi
 
@@ -36,6 +36,7 @@ fi
 
 printf 'plan=%s\n' "${CARGO_SIDESTEP_PLAN:-unknown}"
 printf 'subcommand=%s\n' "${1:-unset}"
+printf 'arg2=%s\n' "${2:-unset}"
 printf 'cargo_home=%s\n' "${CARGO_HOME:-unset}"
 printf 'target_dir=%s\n' "${CARGO_TARGET_DIR:-unset}"
 printf 'build_dir=%s\n' "${CARGO_BUILD_BUILD_DIR:-unset}"
