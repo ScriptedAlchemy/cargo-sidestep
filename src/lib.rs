@@ -288,12 +288,8 @@ impl ExecPlan {
         Self {
             label: "build-lane",
             cargo_home: settings.base_cargo_home.clone(),
-            target_dir: if supports_build_dir {
-                paths.shared_target_dir.clone()
-            } else {
-                lane.target_dir.clone()
-            },
-            build_dir: supports_build_dir.then(|| lane.build_dir.clone()),
+            target_dir: shared_or_lane_target_dir(paths, lane, supports_build_dir),
+            build_dir: lane_build_dir(lane, supports_build_dir),
             offline: false,
         }
     }
@@ -308,12 +304,8 @@ impl ExecPlan {
         Self {
             label: "readonly-overlay",
             cargo_home: cargo_home.to_path_buf(),
-            target_dir: if supports_build_dir {
-                paths.shared_target_dir.clone()
-            } else {
-                lane.target_dir.clone()
-            },
-            build_dir: supports_build_dir.then(|| lane.build_dir.clone()),
+            target_dir: shared_or_lane_target_dir(paths, lane, supports_build_dir),
+            build_dir: lane_build_dir(lane, supports_build_dir),
             offline: true,
         }
     }
@@ -329,10 +321,26 @@ impl ExecPlan {
             label: "online-overlay",
             cargo_home: cargo_home.to_path_buf(),
             target_dir: lane.target_dir.clone(),
-            build_dir: supports_build_dir.then(|| lane.build_dir.clone()),
+            build_dir: lane_build_dir(lane, supports_build_dir),
             offline: false,
         }
     }
+}
+
+fn shared_or_lane_target_dir(
+    paths: &WorkspacePaths,
+    lane: &LaneLease,
+    supports_build_dir: bool,
+) -> PathBuf {
+    if supports_build_dir {
+        paths.shared_target_dir.clone()
+    } else {
+        lane.target_dir.clone()
+    }
+}
+
+fn lane_build_dir(lane: &LaneLease, supports_build_dir: bool) -> Option<PathBuf> {
+    supports_build_dir.then(|| lane.build_dir.clone())
 }
 
 enum RunOutcome {
@@ -494,9 +502,8 @@ impl Drop for LaneLease {
 fn acquire_lane(paths: &WorkspacePaths, slots: usize) -> Result<LaneLease, String> {
     for index in 0..slots {
         let name = format!("lane-{index}");
-        let lease = try_acquire_lane(paths, &name)?;
-        if lease.is_some() {
-            return Ok(lease.expect("checked above"));
+        if let Some(lease) = try_acquire_lane(paths, &name)? {
+            return Ok(lease);
         }
     }
 
@@ -709,10 +716,10 @@ fn default_state_root() -> PathBuf {
     }
     #[cfg(target_os = "macos")]
     {
-        return home_dir()
+        home_dir()
             .join("Library")
             .join("Caches")
-            .join("cargo-sidestep");
+            .join("cargo-sidestep")
     }
     #[cfg(not(target_os = "macos"))]
     {
